@@ -1,0 +1,440 @@
+---
+title: "An Exercise of Data Science Methodology on JHK COVID19 Dataset"
+output: pdf_document
+date: "2023-05-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+###### Note: For this analysis, the following additional libraries are used:
+1. tidyverse
+2. lubridate
+3. flextable
+4. maps
+5. mapdata
+6. gridExtra
+
+
+```{r setup_library, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(flextable)
+library(maps)
+library(mapdata)
+library(gridExtra)
+```
+
+
+## An exercise of applying data science methodology on John Hopkin COVID19 dataset (on github)
+
+### 1. Download raw "COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University" data file hosted in github localted at "https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series" and save a local copy for reference.  In particular, we are going to use the time series data
+```{r import_nypd_data, include=FALSE}
+
+# raw url from the data site
+us_confirmed_url <- "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv"
+us_death_url <- "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv"
+
+world_confirmed_url <- "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+world_death_url <- "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv"
+
+jhk_lookup_url <- "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data//UID_ISO_FIPS_LookUp_Table.csv"
+
+us_confirmed_raw <- read_csv(us_confirmed_url)
+write_csv(us_confirmed_raw, "./us_confirmed_raw.csv")
+
+us_death_raw <- read_csv(us_death_url)
+write_csv(us_death_raw, "./us_death_raw.csv")
+
+world_confirmed_raw <- read_csv(world_confirmed_url)
+write_csv(world_confirmed_raw, "./world_confirmed_raw.csv")
+
+world_death_raw <- read_csv(world_death_url)
+write_csv(world_death_raw, "./world_death_raw.csv")
+
+jhk_lookup_raw <- read_csv(jhk_lookup_url)
+write_csv(jhk_lookup_raw, "./uid_iso_fips_lookup.csv")
+```
+
+### 2. After the raw dataset is downloaded, we will converted structure so that the date counts is shown as rows instead of columns  
+```{r cleanup_1, include=TRUE, message=TRUE}
+world_confirmed_clean1 <- world_confirmed_raw %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', 'Lat', 'Long'), names_to = "date", values_to = "cases")# %>%
+  #select(-c('Lat', 'Long'))
+
+world_death_clean1 <- world_death_raw %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', 'Lat', 'Long'), names_to = "date", values_to = "deaths") #%>%
+  #select(-c('Lat', 'Long'))
+
+us_confirmed_clean1 <- us_confirmed_raw %>%
+  pivot_longer(cols = -(UID:Combined_Key), names_to = "date", values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) #%>%
+  #select(-c(Lat, Long_))
+
+us_death_clean1 <- us_death_raw %>%
+  pivot_longer(cols = -(UID:Population), names_to = "date", values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) #%>%
+  #select(-c(Lat, Long_))
+
+jhk_lookup <- jhk_lookup_raw %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+  
+```
+
+
+### 3. For both Global and US data, let's restructure the dataset so that the COVID cases and deaths are shown in the same dataframe
+```{r combine_world_us, include=TRUE, message=TRUE}
+
+
+global_clean1 <- world_confirmed_clean1 %>%
+  full_join(world_death_clean1) %>%
+  rename(Country_Region = 'Country/Region', Province_State = 'Province/State') %>%
+  mutate(date = mdy(date)) %>%
+  filter(cases > 0)
+
+global_clean2 <- global_clean1 %>%
+  unite("Combined_Key", c(Province_State, Country_Region),
+        sep = ", ", 
+        na.rm = TRUE,
+        remove = FALSE)
+
+global <- global_clean2 %>%
+  left_join(jhk_lookup, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+us <- us_confirmed_clean1 %>%
+  full_join(us_death_clean1)
+
+us_by_state <- us %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mil, Population) %>%
+  ungroup()
+
+us_totals <- us_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths * 1000000 / Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mil, Population) %>%
+  ungroup()
+
+us_by_county <- us %>%
+  group_by(Combined_Key,  date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population), county_lad = max(Lat)) %>%
+  mutate(deaths_per_thou = deaths * 1000 / Population, cases_per_thou = cases * 1000 / Population) %>%
+  select(Combined_Key, date, cases, deaths, deaths_per_thou, cases_per_thou, Population, county_lad) %>%
+  ungroup()
+```
+
+### 4. After the restructuring, perform some sanity check
+```{r assessment_1, echo=FALSE, include=TRUE, message=FALSE}
+summary(us_totals)
+```
+\newpage
+### 5. Perform some ad-hoc plotting to look at the big picture
+#### 5a. Plot on COVID Cases & Deaths for whole US
+```{r visualize1_by_us1, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+us_totals %>%
+  filter(cases > 0) %>% 
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+#grid.arrange(plot_us_totals, nrow=1, ncol=1, widths=unit(6, "in"))
+```
+\newpage
+#### 5b. Plot on COVID Cases & Deaths for whole US
+```{r visualize1_by_us, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+state <- "New York"
+us_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+```
+
+\newpage
+#### 5c. Plot on (New) COVID Cases & Deaths for US
+```{r analyze1, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+#add new case & new death count
+us_by_state <- us_by_state %>%
+  mutate(new_cases = cases - lag(cases), new_deaths = deaths - lag(deaths))
+
+us_totals <- us_totals %>%
+  mutate(new_cases = cases - lag(cases), new_deaths = deaths - lag(deaths))
+
+us_by_state1 <- us_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases), population = max(Population), cases_per_thou = 1000 * cases / population, deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+
+
+us_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+
+#us_by_state1 %>%
+#  slice_min(deaths_per_thou, n = 10)
+
+#us_by_state1 %>%
+#  slice_max(deaths_per_thou, n = 10) %>%
+#  select(deaths_per_thou, cases_per_thou, everything())
+
+```
+
+
+\newpage
+
+
+#### 5d. Plot of a linear module demonstrated during the class
+
+
+```{r model1, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = us_by_state1)
+summary(mod)
+us_by_state_with_pred <- us_by_state1 %>% mutate(pred_deaths_per_thou = predict(mod))
+
+```
+
+
+
+```{r plot_predict1, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+
+us_by_state_with_pred %>%
+  ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred_deaths_per_thou), color = "red")
+
+```
+\newpage
+
+
+# Final Project 2, Perform some additional analysis not performed during class
+
+
+## F2.1 OBSERVATION: "Odd" Increase of NYPD shooting during 2020 (the peak of COVID19 for NY)
+During the analysis of NYPD shooting data in hw#3, I noticed the number of shooting incidents actually sharply increases (>2k at its peak) and stated at a high level throughout the year 2020 to 2022.  This is very puzzling to me as NY started "locked-down" starting 03/2020 and re-open in phrases around 06/2020.  So I wonder if there is any effect of the number of shooting incident due to the "stay-home" mandate (<https://en.wikipedia.org/wiki/Timeline_of_the_COVID-19_pandemic_in_New_York_City>)
+
+
+### F2.1a Need a way to tie the COVID19 & the NYPD shooting incident data together
+According to <https://portal.311.nyc.gov/article/?kanumber=KA-02877>, BORO in the NYPD shooting dataset is actually "county" data in the COVID dataset (i.e. county - called "Admin2" in the dataset).  However, the mapping is as follows: 
+
+
+|Borough (BORO)|County|
+|:-----|:-----|
+|Bronx|Bronx|
+|Brooklyn|Kings|
+|Manhattan|New York|
+|Queens|Queens|
+|Staten|Richmond|
+
+
+```{r final2_1, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+nypd_counties <- us_confirmed_raw %>%
+  filter(Province_State == "New York") %>%
+  filter(Admin2 == "Bronx" | Admin2 == "Kings" | Admin2 == "New York" | Admin2 == "Queens" | Admin2 == "Richmond" )
+
+nypd_confirmed_clean1 <- us_confirmed_raw %>%
+  filter(Province_State == "New York") %>%
+  filter(Admin2 == "Bronx" | Admin2 == "Kings" | Admin2 == "New York" | Admin2 == "Queens" | Admin2 == "Richmond" ) %>%
+  pivot_longer(cols = -(UID:Combined_Key), names_to = "date", values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+nypd_death_clean1 <- us_death_raw %>%
+  filter(Province_State == "New York") %>%
+  filter(Admin2 == "Bronx" | Admin2 == "Kings" | Admin2 == "New York" | Admin2 == "Queens" | Admin2 == "Richmond" ) %>%
+  pivot_longer(cols = -(UID:Population), names_to = "date", values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+nypd_covid <- nypd_confirmed_clean1 %>%
+  full_join(nypd_death_clean1)
+
+nypd_covid_clean1 <- nypd_covid %>%
+  mutate(BORO = tolower(Admin2)) %>%
+  select(-c(Admin2)) %>%
+  group_by(BORO, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths)) %>%
+  select(date, cases, deaths) %>%
+  ungroup()
+  
+#nypd_covid_clean1 <- rename(nypd_covid_clean1, BORO=Admin2)
+```
+\newpage
+
+
+### F2.1b Retrieve NYPD Shooting Data
+
+
+#### Download raw "NYPD Shooting Incident (Historic) data file and save a local copy for reference
+The Year-to-Year plot clearly shows the number of shooting incident rised sharply even during the peak of COVID19 (Motivation for analysis).  
+Although we have NYPD shooting data dated back 2006, we only want to compare the dataset for the period relevant to COVID (ie, 2020-01-22 and later)
+
+```{r final2_2, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+# raw url from the data site
+data_url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd_shooting_incidents_raw2 <- read_csv(data_url)
+write_csv(nypd_shooting_incidents_raw2, "./nypd_shooting_incidents2.csv")
+
+nypd_shooting_year <- nypd_shooting_incidents_raw2 %>%
+  mutate(incident_count=1) %>% 
+  mutate(murder_count=if_else(STATISTICAL_MURDER_FLAG, 1, 0)) %>%
+  group_by(incident_year = year(mdy(OCCUR_DATE))) %>% 
+  summarize(incident_count=sum(incident_count), murder_count=sum(murder_count)) %>% 
+  select(incident_year, incident_count, murder_count) %>%
+  ungroup() %>%
+  gather(key="series", value="y", incident_count, murder_count)
+
+ggplot(nypd_shooting_year, aes(x=incident_year, y=y, color=series)) +
+  geom_point() +
+  geom_line() +
+  geom_text(aes(label=y, vjust=-0.8)) +
+  labs(title="NYPD Shooting Trend (Year-to-Year) from 2006 to 2021", x="Year", y="Shooting Incident / Murder Count")
+
+nypd_shooting_clean1 <- nypd_shooting_incidents_raw2 %>% 
+  mutate(date = mdy(OCCUR_DATE), is_murder = if_else(STATISTICAL_MURDER_FLAG, 1, 0)) %>%
+  filter(date >= min(nypd_covid_clean1$date) & date <= max(nypd_covid_clean1$date)) %>%
+  group_by(date, BORO, INCIDENT_KEY) %>%
+  summarize(shooting_cnt = n(), murder_cnt=sum(is_murder)) %>%
+  group_by(date, BORO) %>%
+  summarize(shooting_cnt = sum(shooting_cnt), murder_cnt=sum(murder_cnt)) %>%
+  ungroup() %>%
+  mutate(BORO = tolower(BORO))
+
+all_dates <- tibble(date = seq.Date(min(nypd_covid_clean1$date), max(nypd_covid_clean1$date), by="day"))
+shooting_bronx <- nypd_shooting_clean1 %>%
+  filter(BORO == "bronx") %>%
+  right_join(all_dates, by = "date") %>%
+  mutate(BORO = "bronx", shooting_cnt = if_else(is.na(shooting_cnt), 0, shooting_cnt), murder_cnt = if_else(is.na(murder_cnt), 0, murder_cnt)) %>%
+  arrange(date) %>%
+  mutate(shooting = cumsum(shooting_cnt), murder = cumsum(murder_cnt))
+
+
+shooting_brooklyn <- nypd_shooting_clean1 %>%
+  filter(BORO == "brooklyn") %>%
+  right_join(all_dates, by = "date") %>%
+  mutate(BORO = "kings", shooting_cnt = if_else(is.na(shooting_cnt), 0, shooting_cnt), murder_cnt = if_else(is.na(murder_cnt), 0, murder_cnt)) %>%
+  arrange(date) %>%
+  mutate(shooting = cumsum(shooting_cnt), murder = cumsum(murder_cnt))
+
+shooting_manhattan <- nypd_shooting_clean1 %>%
+  filter(BORO == "manhattan") %>%
+  right_join(all_dates, by = "date") %>%
+  mutate(BORO = "new york", shooting_cnt = if_else(is.na(shooting_cnt), 0, shooting_cnt), murder_cnt = if_else(is.na(murder_cnt), 0, murder_cnt)) %>%
+  arrange(date) %>%
+  mutate(shooting = cumsum(shooting_cnt), murder = cumsum(murder_cnt))
+
+shooting_queens <- nypd_shooting_clean1 %>%
+  filter(BORO == "queens") %>%
+  right_join(all_dates, by = "date") %>%
+  mutate(BORO = "queens", shooting_cnt = if_else(is.na(shooting_cnt), 0, shooting_cnt), murder_cnt = if_else(is.na(murder_cnt), 0, murder_cnt)) %>%
+  arrange(date) %>%
+  mutate(shooting = cumsum(shooting_cnt), murder = cumsum(murder_cnt))
+
+shooting_statenisland <- nypd_shooting_clean1 %>%
+  filter(BORO == "staten island") %>%
+  right_join(all_dates, by = "date") %>%
+  mutate(BORO = "richmond", shooting_cnt = if_else(is.na(shooting_cnt), 0, shooting_cnt), murder_cnt = if_else(is.na(murder_cnt), 0, murder_cnt)) %>%
+  arrange(date) %>%
+  mutate(shooting = cumsum(shooting_cnt), murder = cumsum(murder_cnt))
+
+nypd_shooting_clean2 <- bind_rows(shooting_bronx, shooting_brooklyn, shooting_manhattan, shooting_queens, shooting_statenisland)
+
+
+nypd_covid_n_shooting <- nypd_shooting_clean2 %>%
+  full_join(nypd_covid_clean1)
+
+#nypd_covid_n_shooting %>% distinct(BORO)
+
+```
+
+\newpage
+
+
+### F2.1c Conclusion: NY's "Lock-Down" manadate beginning 3/20/2020 seems to have minimal effect on the number of shooting incidents.
+Based on the length of the horizontal line in the chart, one can tell if the number of shooting incidents are staying "flat", ie, the longer the horizontal line, the better. From the chart, the orange line (# of shooting) does not seem to a large number of "long horizontal" line, and I will conclude the mandate doesn't seem to have much positive effect in lowering the number of shooting.  However, there are more blue "long horizontal" lines (# of fatal shooting), but it does not necessarily translate into an effect of the "lock-down" mandate (as there is not positive sign in lower shooting incident)   
+
+
+
+```{r final2_3, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+
+ny_mandate_date = as.Date("2020-03-20")
+ny_return1_date = as.Date("2020-06-01")
+
+plot_nypd_covid_n_shooting <- nypd_covid_n_shooting %>%
+  ggplot() +
+  scale_y_log10() +
+  #geom_point() +
+  #geom_line() +
+  geom_point(aes(x = date, y = shooting), color = "orange") +
+  geom_point(aes(x = date, y = murder), color = "blue") +
+  geom_point(aes(x = date, y = cases), color = "cyan") +
+  geom_point(aes(x = date, y = deaths), color = "purple") +
+  geom_vline(xintercept = as.numeric(ny_mandate_date), linetype="dashed", color="red") +
+  geom_vline(xintercept = as.numeric(ny_return1_date), linetype="dashed", color="green") +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) +
+  labs(title = "(2020-23) NYPD Shooting Incident (w/ NY 'Stay Home mandate [3/20/20] & 1st Phrase Re-Opening [6/1/20]'", y = NULL) +
+  theme_void()
+grid.arrange(plot_nypd_covid_n_shooting, nrow=1, ncol=1, widths=unit(6, "in"))
+```
+
+\newpage
+
+
+## F2.2 QUESTION: Does lower latitude counties have better luck w/ COVID?
+In general, there is a belief that warmer locations have better luck with COVID.  Does data for US counties with lower latitude (relatively closer to equator) supports that argument?  For illustration, Alachua in Florida has a latitude of 29.7 and Aleutians East in Alaska has a latitude of 55.3.
+
+### F2.2a Create a linear module to relate latitude and deaths per thousand
+For illustration purpose, I create a module trying to relate the latitude of a county and the its "Death per 1000".  However, based on the chart, it does not seem to be a great fit between the 2 entities.  
+Also, from the spread of the data points, the latitude of the county does not seem to have a clear decisive drive to the number of deaths. So, in conclusion, it does not seem prove one way or the other.
+```{r final2_4, echo=FALSE, error=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.align='center'}
+
+us_by_county1 <- us_by_county %>%
+  group_by(Combined_Key) %>%
+  summarize(deaths = max(deaths), cases = max(cases), population = max(Population), cases_per_thou = 1000 * cases / population, deaths_per_thou = 1000 * deaths / population, county_lad = max(county_lad)) %>%
+  filter(!is.na(deaths_per_thou)) %>%
+  filter(is.finite(deaths_per_thou))
+
+mod <- lm(deaths_per_thou ~ county_lad, data = us_by_county1)
+summary(mod)
+us_by_county_with_pred <- us_by_county1 %>% mutate(pred_deaths_per_thou = predict(mod))
+
+
+us_by_county_with_pred %>%
+  ggplot() +
+  geom_point(aes(x = county_lad, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = county_lad, y = pred_deaths_per_thou), color = "red")
+
+```
+
+
+## F2.3 Bias
+For the analysis of relationship between COVID19 and NYPD shooting incident data, although the "lock-down" mandate does not seem to have much effect on lowering the number of shooting incident.  However, without additional data context related to the shooting, there is no way to determine if the shooting is actually COVID related (eg, more argument/conflict incurred due to lock-down)
+Another source of bias is potentially lack of population density.  For example, a more populus city like New York is more likely to allow the COVID virus to spread among citizens. 
+
